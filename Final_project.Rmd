@@ -1,0 +1,382 @@
+---
+title: "Project"
+author: "Zijian Han"
+date: "December 9, 2017"
+output: html_document
+---
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(mvtnorm)
+library(ggplot2)
+```
+
+
+```{r}
+# read data
+data_file_path <-  "./datafolder/"
+file_list.asc <- list.files(data_file_path)
+file_list_dir <- lapply(file_list.asc, function(x) paste(data_file_path,x,sep = ""))
+file_list_dir <- unlist(file_list_dir)
+
+## Exception file
+data_excp <- read.table('./datafolder/excepth.asc',header = TRUE)
+
+length(file_list_dir) #49 files 
+```
+
+```{r}
+# merge data together with year indicator
+years <- seq(1896,1992,2)
+
+data_all <- NULL
+for(i in 1:length(years))
+{
+  data_sub <- read.table(file_list_dir[i])
+  data_sub$year <- years[i]
+  data_all <- rbind(data_all,data_sub)
+}
+
+
+
+dim(data_all)
+# change name
+colnames(data_all) <- c("State","District","Incumbency_Code","Democratic_votes","Republican_votes","Year")
+
+Minus9_to_NA <- function(col)
+{
+  col[which(col == -9)] <- NA
+  return(col)
+}
+
+data_all <- apply(data_all,2,Minus9_to_NA)
+data_all <- as.data.frame(data_all)
+```
+
+## Linear model
+```{r}
+data_fill <- data_all
+
+data_fill$Incumbency <- NA
+data_fill$Incumbency_vote <- NA
+### Get Incumbency Votes
+Rep_inc <- which(data_fill$Incumbency_Code == -1)
+Dem_inc <- which(data_fill$Incumbency_Code == 1)
+Open_seat <- which(data_fill$Incumbency_Code == 0)
+
+data_fill$Incumbency_vote[Rep_inc] <- data_fill$Republican_votes[Rep_inc]/(data_fill$Republican_votes[Rep_inc]+data_fill$Democratic_votes[Rep_inc])
+data_fill$Incumbency[Rep_inc] <- 1
+
+
+data_fill$Incumbency_vote[Dem_inc] <- data_fill$Democratic_votes[Dem_inc]/(data_fill$Republican_votes[Dem_inc]+data_fill$Democratic_votes[Dem_inc])
+data_fill$Incumbency[Dem_inc] <- 1
+
+for(i in Open_seat)
+{
+data_fill$Incumbency_vote[i] <- max(data_fill$Democratic_votes[i]/(data_fill$Republican_votes[i]+data_fill$Democratic_votes[i]),data_fill$Republican_votes[i]/(data_fill$Republican_votes[i]+data_fill$Democratic_votes[i]))
+}
+data_fill$Incumbency[Open_seat] <- 0
+
+
+lm_model <- function(t)
+{
+  ref_year <- t-2
+  data_ols <- data.frame(ref_prop_vote = data_fill[which(data_fill$Year == ref_year),'Incumbency_vote'], y =data_fill[which(data_fill$Year == t),'Incumbency_vote'],incumbency = data_fill[which(data_fill$Year == t),'Incumbency'],incumbency_part = data_fill[which(data_fill$Year == ref_year),'Incumbency_Code'])
+  
+  model <- lm(y~. , data = data_ols)
+  return(as.numeric(confint(model, 'incumbency', level=0.95)))
+}
+
+r = NULL
+
+year.period1 <- c(1904,1906,1908,1910,1914,1916,1918,1920,1924,1926,1928,1930,1934,1936,1938,1940,1944,1946,1948,1950,1954,1956,1958,1960,1964,1966,1968,1970,1974,1976,1978,1980,1984,1986,1988,1990)
+for(year in year.period1)
+{
+  ci <- lm_model(year)
+  r <- rbind(r,ci)
+}
+
+colnames(r) <- c("L","U") 
+r <- as.data.frame(r) 
+r$point <- apply(r,1,mean)
+r$year <- year.period1
+
+
+ggplot(r, aes(x = year, y = point)) + geom_point(size = 1.5) + ylab("Estimated Incumbency Advantage") + xlab("Year") + geom_errorbar(aes(ymax = U,ymin = L)) + theme_bw() + ylim(-0.07,0.18)
+```
+
+
+
+```{r}
+Yr <- seq(1900,1990,2)
+Yr <- Yr[-seq(1,46,5)]
+
+result <- matrix(NA,nrow = 36,ncol = 13)
+for(i in 1:36){
+  y <- subset.data.frame(data_fill,data_fill$Year==Yr[i]+2,select = c('Incumbency_vote'))
+  X <- cbind(y,data_fill[which(data_fill$Year == Yr[i]),"Incumbency_vote"],data_fill[which(data_fill$Year == Yr[i]+2),"Incumbency"],rep(1,length(y)),data_fill[which(data_fill$Year == Yr[i]),"Incumbency_Code"])
+  X <- na.omit(X)
+  y <- as.vector(X[,1])
+  X <- as.matrix(X[,-1])
+  
+  #  Read data dimensions
+  n <- dim(X)[1] ; p <- dim(X)[2]
+  # Set prior parameters
+  nu0 <- 1; g <- n
+  s20 <- summary(lm(y ~ X ))$sigma^2
+  mXX <- solve(t(X)%*%X)
+  # Posterior calculations
+  Hg <- (g/(g+1)) * X%*%mXX%*%t(X)
+  SSRg <- t(y)%*%( diag(1,nrow=n)-Hg )%*%y
+  Vbeta <- (g/(g+1))*mXX
+  Ebeta <- Vbeta%*%t(X)%*%y
+  # Simulate sigma^2 and then beta|sigma^2
+  s2.post <- beta.post<-NULL 
+  for(s in 1:5000)
+  {
+    s2.post<-c(s2.post, (nu0*s20+SSRg)/rchisq(1,nu0+n))
+    beta.post<-rbind(beta.post, rmvnorm(1,Ebeta,s2.post[s]*Vbeta)) 
+  }
+  
+  temp <- apply(beta.post,2,quantile,probs=c(.025,.5,.975))
+  result[i,] <- c(Yr[i]+2,temp[,1],temp[,2],temp[,3],temp[,4])
+}
+View(result)
+colnames(result) <- c('Year','Prop 2.5%','Prop 50%','Prop 97.5%',
+                      'Incumbency 2.5%','Incumbency 50%','Incumbency 97.5%',
+                      'Constant 2.5%','Constant 50%','Constant 97.5%','Incumbency code 2.5%','Incumbency code 50%','Incumbency code 97.5%')
+
+result <- data.frame(result)
+attach(result)
+ggplot(data = result, aes(x = Year, y = Incumbency.50.))+geom_point(size = 1.5) + geom_errorbar(aes(ymax = Incumbency.97.5.,ymin = Incumbency.2.5.))+ ylab('Estimated Incumbency') + theme_bw()+ylim(-0.07,0.18)
+```
+
+## Bayesian Hierarchical model
+
+```{r}
+## Manipulate data
+year.period1 <- c(1904,1906,1908,1910,1914,1916,1918,1920,1924,1926,1928,1930,1934,1936,1938,1940,1944,1946,1948,1950,1954,1956,1958,1960,1964,1966,1968,1970,1974,1976,1978,1980,1984,1986,1988,1990)
+
+## Ad-hoc estimates from OLS
+
+lm_model <- function(t)
+{
+  ref_year <- t-2
+  data_ols <- data.frame(y =data_fill[which(data_fill$Year == t),'Incumbency_vote'],previous_vote = data_fill[which(data_fill$Year == ref_year),'Incumbency_vote'],previous_incum = data_fill[which(data_fill$Year == ref_year),'Incumbency_Code'], current_incum = data_fill[which(data_fill$Year == t),'Incumbency'])
+  
+  model <- lm(y~. , data = data_ols)
+  return(as.numeric(model$coefficients))
+}
+
+OLS.Beta <- NULL
+for(t in year.period1)
+{
+  r <- lm_model(t)
+  OLS.Beta <- rbind(OLS.Beta,r)
+}
+
+lm_model_red <- function(t)
+{
+  ref_year <- t-2
+  data_ols <- data.frame(y =data_fill[which(data_fill$Year == t),'Incumbency_vote'],previous_vote = data_fill[which(data_fill$Year == ref_year),'Incumbency_vote'],previous_incum = data_fill[which(data_fill$Year == ref_year),'Incumbency_Code'], current_incum = data_fill[which(data_fill$Year == t),'Incumbency'])
+  
+  model <- lm(y~. , data = data_ols)
+  return(residuals(model))
+}
+
+RESI <- NULL
+
+for(t in year.period1)
+{
+  resi_var <- var(lm_model_red(t))
+  RESI <- rbind(RESI,resi_var)
+}
+
+#sigma2
+s20 <- mean(RESI)
+
+# Theta
+mu0 <- apply(OLS.Beta,2,mean) # Take the means for each column
+
+# Sigma
+L0<-var(OLS.Beta) # Variance as variance of prior
+#L0
+
+merge_data <- NULL
+
+for(year in year.period1)
+{
+  data_merge <- data_frame(current_vote = data_fill[which(data_fill$Year == year),"Incumbency_vote"],previous_vote = data_fill[which(data_fill$Year == year-2),"Incumbency_vote"],current_incum = data_fill[which(data_fill$Year == year),"Incumbency"], previous_incum = data_fill[which(data_fill$Year == year-2),"Incumbency_Code"],State = data_fill[which(data_fill$Year == year),"State"],District = data_fill[which(data_fill$Year == year),"District"],Year = data_fill[which(data_fill$Year == year),"Year"])
+  merge_data <- rbind(merge_data,data_merge)
+}
+
+# Eliminate the "at-large" districts
+merge_data <- merge_data[-which(merge_data$District > 50),]
+# Eliminate NA values
+merge_data <- na.omit(merge_data)
+# Construct of Y and X
+Y <- NULL
+for(i in 1:length(year.period1))
+{
+  Y[[i]] <- merge_data$current_vote[which(merge_data$Year == year.period1[i])]
+}
+
+X.l <- NULL
+for(i in 1:length(year.period1))
+{
+  X.l[[i]] <- cbind(rep(1,length(which(merge_data$Year == year.period1[i]))),merge_data$previous_vote[which(merge_data$Year == year.period1[i])],merge_data$previous_incum[which(merge_data$Year == year.period1[i])],merge_data$current_incum[which(merge_data$Year == year.period1[i])])
+}
+
+# Define two functions
+rmv<-function(n,mu,Sigma){ # samples Y~MVN(mu,Sigma)
+cm<-chol(Sigma);d<-dim(Sigma)[1]
+Y0<-matrix(rnorm(n*d),nrow=d)
+t(cm)%*%Y0 + mu
+}
+riw<-function(n,nu0,Sigma){ # Sigma~IW(nu0,Sigma^(-1)); requires rmv
+m<- solve(Sigma)
+sapply(1:n,function(i)
+solve(crossprod(t(rmv(nu0*n,0,m))[(i-1)*nu0+1:nu0,])), simplify = 'array')
+}
+
+year.count <- merge_data %>% group_by(Year) %>% summarise(n = n())
+
+n <- year.count$n
+m <- length(year.period1)
+eta0 <- 6; S0 <- L0
+nu0 <- 1; s02 <- s20
+# Gibbs Sampler initial values
+beta<-mu0
+S2<-S0
+s2<-s02
+Beta<-list(); Beta.t<-TH<-Sigma<-sigma2<-NULL
+S<-10000
+
+
+
+set.seed(1)
+for (s in 1:S)
+{
+# update theta
+Lm<-solve(solve(L0)+m*solve(S2)); Bm<-mu0
+mum <- Lm%*%(solve(L0)%*%mu0+m*solve(S2)%*%Bm)
+theta <- c(rmv(1,mum,Lm))
+# Update beta for each group
+mS2<- solve(S2)
+mS <- lapply(1:m,function(j) solve(mS2+t(X.l[[j]])%*%X.l[[j]]/s2))
+beta<-sapply(1:m,function(j) rmv(1,mS[[j]]%*%(mS2%*%theta+t(X.l[[j]])%*%Y[[j]]/s2),mS[[j]]))
+# Update sigma^2
+s2 <- (nu0*s02+do.call('sum',lapply(1:m,function(j) crossprod(Y[[j]]-X.l[[j]]%*%beta[,j]))))/rchisq(1,nu0+sum(n))
+# Update Sigma
+St<-crossprod(t(beta-theta))
+S2<-riw(1,eta0+m,S0+St)[,,1]
+# Predictive distribution of beta
+beta.t <- rmv(1,theta,S2)
+Beta[[s]]<-beta; Beta.t<-rbind(Beta.t,c(beta.t))
+sigma2<-c(sigma2,s2);Sigma<-rbind(Sigma,c(S2));TH<-rbind(TH,theta)
+}
+
+Beta.p.array <- array(0,dim = c(10000,m,4))
+
+apply(Beta.t,2,function(x)quantile(x,c(0.025,0.25,0.5,0.75,0.975)))
+
+
+# Obtain posterior expectations for Beta
+for(i in 1:S)
+{
+group.coef <- Beta[[i]]
+  for(j in 1:m)
+  {
+    Beta.p.array[i,j,] <- group.coef[,j]
+  }
+}
+
+M <- NULL
+L <- NULL
+U <- NULL
+
+for(j in 1:36)
+{
+    M[j] <- as.numeric(quantile(Beta.p.array[,j,4],0.5))
+    L[j] <- as.numeric(quantile(Beta.p.array[,j,4],0.025))
+    U[j] <- as.numeric(quantile(Beta.p.array[,j,4],0.975))
+}
+
+hierar_incum_p <- data.frame(L = L,U = U,point= M ,year = year.period1)
+
+hierar_incum_p$type <- "Bayesian"
+r$type <- 'OLS'
+
+data_to_plot <- rbind(hierar_incum_p,r)
+
+
+ggplot(data_to_plot, aes(x = year, y = point,color = type)) + geom_point(size = 1.5) + ylab("Estimated Incumbency Advantage") + xlab("Year") + geom_errorbar(aes(ymax = U,ymin = L,color = type)) + theme_bw() + ylim(-0.07,0.18) + scale_color_manual(values = c(1,2))
+
+par(mfrow=c(1,3))
+plot(density(TH[,4],adjust = 2),xlab = "Incumbency Advantage",main = "Incumbency Advantage",col = 2,lwd = 2,ylim=c(0,240))
+lines(density(rnorm(1000,mu0[4],S0[4,4]),adjust = 2),col = 1,lwd = 2)
+
+plot(density(TH[,2],adjust = 2),xlab = "Previous vote proportion",main = "Previous vote proportion",col = 2,lwd = 2)
+lines(density(rnorm(1000,mu0[2],S0[2,2]),adjust = 2),col = 1,lwd = 2)
+
+plot(density(TH[,3],adjust = 2),xlab = "Previous Incumbency",main = "Previous Incumbency",col = 2,lwd = 2,ylim = c(0,350))
+lines(density(rnorm(1000,mu0[3],S0[3,3]),adjust = 2),col = 1,lwd = 2)
+```
+
+## Gibbs sampling diagnostics
+```{r}
+# previous_vote, current_incumbency, constant, previous incumb
+model2_beta <- beta.post
+library(coda)
+effectiveSize(beta.post[,1])
+effectiveSize(beta.post[,4])
+acf(beta.post[,1],lag = 1000)
+acf(beta.post[,2],lag = 1000)
+par(mfrow = c(2,2))
+plot(beta.post[,1],ylab=("Previous vote effect"))
+plot(beta.post[,4],ylab=("Previous incumbency effect"))
+plot(beta.post[,2],ylab=("Current incumbency effect"))
+plot(beta.post[,3],ylab=("Contant term"))
+acf(beta.post[,1],lag = 500,main=("ACF:Previous vote"),ylim=c(0,0.2))
+acf(beta.post[,4],lag = 500,main=("ACF:Previous incumbency"),ylim=c(0,0.2))
+acf(beta.post[,2],lag = 500,main=("ACF:Current incumbency"),ylim=c(0,0.2))
+acf(beta.post[,3],lag = 500,main=("ACF:Contant term"),ylim=c(0,0.2))
+```
+
+
+```{r}
+y <- subset.data.frame(data_fill,data_fill$Year==Yr[33]+2,select = c('Incumbency_vote'))
+  X <- cbind(y,data_fill[which(data_fill$Year == Yr[33]),"Incumbency_vote"],data_fill[which(data_fill$Year == Yr[33]+2),"Incumbency"],rep(1,length(y)),data_fill[which(data_fill$Year == Yr[33]),"Incumbency_Code"])
+  X <- na.omit(X)
+  y <- as.vector(X[,1])
+  X <- as.matrix(X[,-1])
+  
+  #  Read data dimensions
+  n <- dim(X)[1] ; p <- dim(X)[2]
+  # Set prior parameters
+  nu0 <- 1; g <- n
+  s20 <- summary(lm(y ~ X ))$sigma^2
+  mXX <- solve(t(X)%*%X)
+  # Posterior calculations
+  Hg <- (g/(g+1)) * X%*%mXX%*%t(X)
+  SSRg <- t(y)%*%( diag(1,nrow=n)-Hg )%*%y
+  Vbeta <- (g/(g+1))*mXX
+  Ebeta <- Vbeta%*%t(X)%*%y
+  # Simulate sigma^2 and then beta|sigma^2
+  s2.post <- beta.post<-NULL 
+  for(s in 1:5000)
+  {
+    s2.post<-c(s2.post, (nu0*s20+SSRg)/rchisq(1,nu0+n))
+    beta.post<-rbind(beta.post, rmvnorm(1,Ebeta,s2.post[s]*Vbeta)) 
+  }
+  
+par(mfrow=c(1,2))
+
+plot(beta.post[,2],ylab=("Current incumbency effect"),main=("Trace plot"))
+acf(beta.post[,2],lag = 500,main=("ACF:Current incumbency"),ylim=c(0,0.2))
+
+plot(Beta.t[,4],ylab = ("Current incumbency effect"),main=("Trace plot"))
+acf(Beta.t[,4],lag = 500,main=("ACF:Current incumbency"),ylim=c(0,0.2))
+```
+
